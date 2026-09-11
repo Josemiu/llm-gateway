@@ -3,7 +3,7 @@ uvicorn[standard]==0.32.0
 pydantic==2.13.5
 pydantic-settings==2.6.0
 httpx==0.28.1
-openai==1.54.0
+openai==1.55.3
 google-genai==2.22.0
 python-dotenv==1.0.1
 pytest==8.3.0

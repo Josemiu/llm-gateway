@@ -61,17 +61,26 @@ async def test_chat_completion_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_completion_all_providers_missing_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("app.providers.gemini_provider.settings.gemini_api_key", None)
+    monkeypatch.setattr("app.providers.openai_provider.settings.openai_api_key", None)
 
-    with patch("app.providers.gemini_provider.genai.Client") as mock_client_cls:
+    with (
+        patch("app.providers.gemini_provider.genai.Client") as mock_gemini_cls,
+        patch("app.providers.openai_provider.AsyncOpenAI") as mock_openai_cls,
+    ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post("/v1/chat/completions", json=REQUEST_BODY)
 
     assert response.status_code == 500
-    assert "GEMINI_API_KEY" in response.json()["detail"]
-    mock_client_cls.assert_not_called()
+    detail = response.json()["detail"]
+    assert "GEMINI_API_KEY" in detail
+    assert "OPENAI_API_KEY" in detail
+    mock_gemini_cls.assert_not_called()
+    mock_openai_cls.assert_not_called()
 
 
 def test_providers_implement_llm_provider_interface() -> None:
