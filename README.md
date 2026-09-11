@@ -1,0 +1,150 @@
+# LLM Gateway
+
+Gateway de LLMs con routing inteligente, fallback automático entre providers, auth, rate limiting, cost tracking y métricas — no un wrapper de ChatGPT.
+
+## Arquitectura
+
+```
+Client
+  │
+  ▼
+Auth (X-API-Key header) ──────── 401 si falta o es inválida
+  │
+  ▼
+Rate Limit (Redis, fixed window) ─ 429 si se supera el límite
+  │
+  ▼
+Routing (heurística "auto" o prefijo de modelo explícito)
+  │
+  ▼
+Provider (Gemini u OpenAI) ──┐
+  │                          │ falla (ProviderError / timeout)
+  │ éxito                    ▼
+  │                    Fallback → el otro provider (un solo reintento)
+  │                          │
+  └──────────┬───────────────┘
+             ▼
+     Cost Tracking (background task, no bloquea la respuesta) → Postgres
+             ▼
+         Response
+```
+
+`GET /v1/usage` y `GET /metrics` leen de la misma tabla de Postgres (`usage_records`) para exponer agregados por API key y globales, respectivamente.
+
+## Features
+
+- **Routing con heurística explicable**: longitud del prompt + keywords simples (`code`, `analyze`, `explain in detail`) deciden entre Gemini (rápido/barato) y OpenAI (más potente) cuando `model: "auto"`.
+- **Fallback automático entre providers**: si el provider elegido falla (error o timeout), se reintenta una vez con el otro antes de devolver un error al cliente.
+- **Auth por API key**: header `X-API-Key` validado contra una lista en `.env`, implementado como dependency explícita de FastAPI.
+- **Rate limiting con Redis**: fixed window counter (`INCR`+`EXPIRE`) por API key, con fail-open si Redis no responde.
+- **Cost tracking en Postgres**: cada request queda registrada (tokens, costo estimado, latencia, éxito/error, si usó fallback) sin bloquear la respuesta.
+- **Endpoint de métricas**: agregados globales con ventana de los últimos 60s y del día corrido (UTC).
+
+## Stack
+
+- Python 3.11+, FastAPI, Pydantic v2
+- PostgreSQL 16 (cost tracking), Redis 7 (rate limiting)
+- SQLAlchemy 2.0 (async, driver `asyncpg`) + Alembic para migraciones
+- Docker / docker-compose (Redis y Postgres en desarrollo local)
+- Providers: OpenAI SDK y Google GenAI SDK (Gemini)
+
+## Cómo levantarlo localmente
+
+```bash
+git clone <este-repo>
+cd llm-gateway
+
+python -m venv venv
+venv\Scripts\activate          # Windows (o `source venv/bin/activate` en Linux/Mac)
+pip install -r requirements.txt
+
+docker compose up -d           # levanta Redis (6379) y Postgres (5432)
+
+cp .env.example .env
+# completar en .env: OPENAI_API_KEY, GEMINI_API_KEY, VALID_API_KEYS
+# (REDIS_URL, RATE_LIMIT_PER_MINUTE y DATABASE_URL ya traen defaults que
+# matchean el docker-compose.yml, no hace falta tocarlos en local)
+
+alembic upgrade head            # crea la tabla usage_records en Postgres
+
+uvicorn app.main:app --reload
+```
+
+Para correr los tests (no dependen de Redis/Postgres reales — usan `fakeredis` y SQLite en memoria):
+```bash
+pytest tests/ -v
+```
+
+## Ejemplos de uso
+
+**Chat completion** (routing automático):
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: devkey1" \
+  -d '{
+    "model": "auto",
+    "messages": [{"role": "user", "content": "Explain what a load balancer does"}]
+  }'
+```
+```json
+{
+  "content": "A load balancer distributes incoming network traffic...",
+  "model": "gemini-3.5-flash-lite",
+  "usage": {"input_tokens": 8, "output_tokens": 142, "total_tokens": 150}
+}
+```
+
+**Uso acumulado de una API key**:
+```bash
+curl http://localhost:8000/v1/usage -H "X-API-Key: devkey1"
+```
+```json
+{
+  "api_key": "devkey1",
+  "total_requests": 12,
+  "total_input_tokens": 340,
+  "total_output_tokens": 2150,
+  "total_estimated_cost_usd": 0.00412,
+  "avg_latency_ms": 780.5,
+  "fallback_rate": 0.0833
+}
+```
+
+**Métricas globales** (sin auth, endpoint operacional):
+```bash
+curl http://localhost:8000/metrics
+```
+```json
+{
+  "last_60s": {
+    "request_count": 3,
+    "requests_per_second": 0.05,
+    "avg_latency_ms": 612.0,
+    "error_rate": 0.0,
+    "fallback_rate": 0.0
+  },
+  "today": {
+    "request_count": 45,
+    "requests_per_second": 0.0021,
+    "avg_latency_ms": 701.4,
+    "error_rate": 0.022,
+    "fallback_rate": 0.11,
+    "cost_usd": 0.0187
+  }
+}
+```
+
+## Decisiones técnicas destacadas
+
+- **`BackgroundTasks` se pierde si el endpoint hace `raise HTTPException`**: Starlette solo ejecuta las background tasks adjuntas a la `Response` que efectivamente se envía. Por eso el camino de "ambos providers fallaron" devuelve `JSONResponse(..., background=background_tasks)` en vez de levantar la excepción — si no, el registro de cost tracking del caso de error se perdía silenciosamente.
+- **Rate limiting fail-open**: si Redis no responde, la request pasa sin aplicar el límite (con un `WARNING` en logs) en vez de tirar el gateway completo — Redis todavía no es infraestructura de alta disponibilidad en este proyecto.
+- **Tests aislados con SQLite + `StaticPool`**: toda la suite corre sin depender de Postgres/Redis reales (`fakeredis` + SQLite en memoria), verificando explícitamente que las queries agregadas dan el mismo resultado en ambos dialectos antes de confiar en el atajo.
+- **Un solo punto de patch para la sesión de DB**: los módulos de servicio acceden vía `database.async_session_factory()` (no importan el nombre directo), así los tests parchean un único lugar canónico y ningún módulo nuevo puede "olvidarse" de quedar aislado de la base real — esto costó un bug real (tests escribiendo en Postgres de verdad) que quedó documentado.
+
+Ver [`DECISIONS.md`](./DECISIONS.md) para el detalle completo de estas y otras ~20 decisiones documentadas a lo largo del desarrollo.
+
+## Roadmap / qué falta
+
+- **Fase 7** (no implementada): exportar métricas en formato Prometheus + dashboard de Grafana, y Dockerizar el gateway mismo (hoy Docker solo levanta Redis y Postgres, la app corre con `uvicorn` directo).
+- **OllamaProvider**: no implementado por limitaciones de hardware disponible durante el desarrollo, pero la interfaz `LLMProvider` ya lo soporta como una extensión trivial (solo implementar `generate()`, sin tocar el resto del gateway) — ver `DECISIONS.md`.
