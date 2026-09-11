@@ -3,7 +3,7 @@ import logging
 from sqlalchemy import case, func, select
 
 from app.schemas.usage import UsageSummary
-from app.services.database import async_session_factory
+from app.services import database
 from app.services.models import UsageRecord
 from app.services.pricing import estimate_cost
 
@@ -24,7 +24,7 @@ async def record_usage(
 ) -> None:
     estimated_cost = estimate_cost(model_used, input_tokens, output_tokens)
     try:
-        async with async_session_factory() as session:
+        async with database.async_session_factory() as session:
             session.add(
                 UsageRecord(
                     api_key=api_key,
@@ -48,7 +48,7 @@ async def record_usage(
 
 
 async def get_usage_summary(api_key: str) -> UsageSummary:
-    async with async_session_factory() as session:
+    async with database.async_session_factory() as session:
         result = await session.execute(
             select(
                 func.count(),

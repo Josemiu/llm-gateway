@@ -167,6 +167,7 @@ pooling). Se probó que el esquema y las queries agregadas (`COUNT`/`SUM`/
 Postgres real antes de asumir que alcanzaba para testear. Esto evita
 depender de Postgres corriendo en CI; la fidelidad con Postgres real se
 verifica manualmente (ver sección de Verificación del plan de Fase 5), no
+en el test suite automatizado.
 
 **Bug real encontrado al verificar manualmente**: el redirect a SQLite se
 había implementado solo en los dos archivos de test nuevos de esta fase.
@@ -180,7 +181,6 @@ inspeccionando la tabla real después de correr la suite. Fix: el fixture
 de redirect a SQLite se movió a `tests/conftest.py` como `autouse=True`,
 así aplica a **todos** los tests del proyecto sin que cada archivo nuevo
 tenga que acordarse de configurarlo.
-en el test suite automatizado.
 
 ## `GET /v1/usage` autenticado por header, no `?api_key=`
 
@@ -189,3 +189,52 @@ Se reutiliza `verify_api_key` (Fase 4, sin modificarlo) vía el mismo header
 query param pondría una API key (un secreto) en logs de acceso, historial
 del navegador y proxies intermedios — mal patrón para credenciales. La key
 autenticada ya determina de quién es el usage a devolver.
+
+## `/metrics`: dos ventanas (`last_60s` + `today`), sin `all_time`
+
+Se expone `last_60s` (foto del minuto más reciente, puede dar todo en cero
+sin tráfico) y `today` (agregados desde medianoche UTC — misma ventana que
+"costo acumulado del día", una sola query reutilizada). Se descartó una
+ventana `all_time`: en una tabla que crece para siempre, agregar sin límite
+de fecha se vuelve cada vez más caro y cada vez menos representativo de
+"cómo está el sistema hoy" — `today` ya cubre el caso de tráfico esporádico
+sin ese costo creciente.
+
+## `/metrics` sin auth (limitación temporal)
+
+`GET /metrics` no está detrás de `verify_api_key`: es un endpoint
+operacional/global, no asociado a un cliente particular, y Fase 4 solo
+construyó auth de API key de cliente, no un tier de "admin"/operador.
+Exponer costo agregado y tasas de error sin auth no es ideal para un
+despliegue real — se documenta como limitación temporal, a resolver si
+alguna vez se construye un tier de auth de operador (no está pedido todavía).
+
+## Índice en `usage_records.created_at`
+
+Se agregó `index=True` a esa columna (antes solo `api_key` estaba
+indexada) porque `/metrics` hace `WHERE created_at >= :cutoff` en cada
+llamada — sin índice, cada consulta escanea toda la tabla a medida que
+crece. Migración aditiva (`CREATE INDEX`), no toca datos existentes.
+
+## Comparaciones de fecha: siempre en UTC, verificado entre SQLite y Postgres
+
+`func.now()` en SQLite devuelve un datetime naive (sin tzinfo); en Postgres
+devuelve un datetime tz-aware en UTC. Se verificó con código que comparar
+ambos casos contra un cutoff calculado con `datetime.now(timezone.utc)`
+funciona correctamente en los dos dialectos, porque el `CURRENT_TIMESTAMP`
+de SQLite ya es UTC internamente (solo le falta la etiqueta de tz). Regla
+seguida en todo el código de `/metrics`: los cutoffs de fecha siempre se
+calculan con `datetime.now(timezone.utc)`, nunca con hora local naive.
+
+## `async_session_factory`: un solo punto de patch, no uno por módulo
+
+Al agregar `metrics_service.py`, sus queries corrían contra el Postgres
+real en los tests (y de paso rompían un segundo test por una conexión de
+asyncpg atada a un event loop ya cerrado), porque `tests/conftest.py` solo
+parcheaba `app.services.usage_service.async_session_factory` — el nombre
+importado directamente en ese módulo, no en el nuevo. Fix: `usage_service.py`
+y `metrics_service.py` ahora acceden vía `database.async_session_factory()`
+(importando el módulo, no el nombre), y `conftest.py` parchea un solo lugar
+canónico: `app.services.database.async_session_factory`. Cualquier módulo
+nuevo que consulte la DB con este mismo patrón queda cubierto automáticamente,
+sin tener que acordarse de tocar `conftest.py` de nuevo.

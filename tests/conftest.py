@@ -14,6 +14,15 @@ async def usage_db(monkeypatch: pytest.MonkeyPatch):
     record_usage background task just by exercising a successful endpoint
     call - only tests that actually care about usage tracking need to
     reference this fixture's return value.
+
+    Patches `app.services.database.async_session_factory` - the single
+    canonical location - rather than each consumer module's own imported
+    name. Consumers (usage_service, metrics_service, ...) must look it up
+    via `database.async_session_factory()` at call time (not
+    `from app.services.database import async_session_factory`), otherwise
+    they'd bind their own local reference at import time and this patch
+    would silently miss them (this bit us once already when
+    metrics_service.py was added without updating this fixture).
     """
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -24,7 +33,7 @@ async def usage_db(monkeypatch: pytest.MonkeyPatch):
         await conn.run_sync(Base.metadata.create_all)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    monkeypatch.setattr("app.services.usage_service.async_session_factory", session_factory)
+    monkeypatch.setattr("app.services.database.async_session_factory", session_factory)
 
     yield session_factory
 
