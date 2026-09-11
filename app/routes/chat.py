@@ -1,8 +1,9 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.middleware.rate_limit import enforce_rate_limit
 from app.providers.base import ProviderError, ProviderResponse
 from app.routing.selector import RoutingDecision, RoutingError, select_fallback, select_provider
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Usage
@@ -29,9 +30,14 @@ async def _generate_with_timeout(
         ) from exc
 
 
+# Pipeline: Auth (verify_api_key) -> Rate Limit (enforce_rate_limit) -> Routing
+# (select_provider) -> Fallback (select_fallback) -> Provider (LLMProvider.generate).
+# Auth and rate limiting run before this function body, via the enforce_rate_limit
+# dependency chain (it depends on verify_api_key, so FastAPI resolves auth first).
 @router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def create_chat_completion(
     request: ChatCompletionRequest,
+    api_key: str = Depends(enforce_rate_limit),
 ) -> ChatCompletionResponse:
     try:
         primary = select_provider(request.model, request.messages)

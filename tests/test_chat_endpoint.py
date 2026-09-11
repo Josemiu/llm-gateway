@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, patch
 
+import fakeredis
 import pytest
 from google.genai import types
 from httpx import ASGITransport, AsyncClient
@@ -13,6 +14,15 @@ REQUEST_BODY = {
     "model": "auto",
     "messages": [{"role": "user", "content": "Explain Kubernetes"}],
 }
+
+TEST_API_KEY = "chat-endpoint-test-key"
+
+
+def _authorize(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.middleware.auth.settings.valid_api_keys", TEST_API_KEY)
+    monkeypatch.setattr(
+        "app.middleware.rate_limit.redis_client", fakeredis.FakeAsyncRedis()
+    )
 
 
 def _fake_response() -> types.GenerateContentResponse:
@@ -38,6 +48,7 @@ async def test_chat_completion_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.providers.gemini_provider.settings.gemini_api_key", "test-key"
     )
+    _authorize(monkeypatch)
 
     with patch("app.providers.gemini_provider.genai.Client") as mock_client_cls:
         mock_client = mock_client_cls.return_value
@@ -47,7 +58,11 @@ async def test_chat_completion_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/v1/chat/completions", json=REQUEST_BODY)
+            response = await client.post(
+                "/v1/chat/completions",
+                json=REQUEST_BODY,
+                headers={"X-API-Key": TEST_API_KEY},
+            )
 
     assert response.status_code == 200
     body = response.json()
@@ -66,6 +81,7 @@ async def test_chat_completion_all_providers_missing_api_key(
 ) -> None:
     monkeypatch.setattr("app.providers.gemini_provider.settings.gemini_api_key", None)
     monkeypatch.setattr("app.providers.openai_provider.settings.openai_api_key", None)
+    _authorize(monkeypatch)
 
     with (
         patch("app.providers.gemini_provider.genai.Client") as mock_gemini_cls,
@@ -73,7 +89,11 @@ async def test_chat_completion_all_providers_missing_api_key(
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/v1/chat/completions", json=REQUEST_BODY)
+            response = await client.post(
+                "/v1/chat/completions",
+                json=REQUEST_BODY,
+                headers={"X-API-Key": TEST_API_KEY},
+            )
 
     assert response.status_code == 500
     detail = response.json()["detail"]

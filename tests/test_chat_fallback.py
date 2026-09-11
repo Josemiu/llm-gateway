@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, patch
 
+import fakeredis
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -12,6 +13,16 @@ SHORT_PROMPT_BODY = {
     "model": "auto",
     "messages": [{"role": "user", "content": "Hi there"}],
 }
+
+TEST_API_KEY = "chat-fallback-test-key"
+
+
+@pytest.fixture(autouse=True)
+def _authorize(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.middleware.auth.settings.valid_api_keys", TEST_API_KEY)
+    monkeypatch.setattr(
+        "app.middleware.rate_limit.redis_client", fakeredis.FakeAsyncRedis()
+    )
 
 
 def _set_dummy_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,7 +57,11 @@ async def test_fallback_to_second_provider_on_primary_failure(
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/v1/chat/completions", json=SHORT_PROMPT_BODY)
+            response = await client.post(
+                "/v1/chat/completions",
+                json=SHORT_PROMPT_BODY,
+                headers={"X-API-Key": TEST_API_KEY},
+            )
 
     assert response.status_code == 200
     body = response.json()
@@ -74,7 +89,11 @@ async def test_both_providers_failing_returns_clear_error(
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/v1/chat/completions", json=SHORT_PROMPT_BODY)
+            response = await client.post(
+                "/v1/chat/completions",
+                json=SHORT_PROMPT_BODY,
+                headers={"X-API-Key": TEST_API_KEY},
+            )
 
     assert response.status_code == 502
     detail = response.json()["detail"]
@@ -98,6 +117,7 @@ async def test_unrecognized_model_returns_400_without_calling_any_provider() -> 
                     "model": "claude-3-opus",
                     "messages": [{"role": "user", "content": "hi"}],
                 },
+                headers={"X-API-Key": TEST_API_KEY},
             )
 
     assert response.status_code == 400
