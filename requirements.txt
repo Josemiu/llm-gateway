@@ -11,3 +11,7 @@ pytest-asyncio==0.24.0
 redis==8.1.0
 fakeredis==2.38.0
 freezegun==1.5.5
+sqlalchemy==2.0.52
+alembic==1.19.2
+asyncpg==0.31.0
+aiosqlite==0.22.1

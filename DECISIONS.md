@@ -105,3 +105,87 @@ que es lo que usa el loop de `asyncio` para sus timeouts (como el
 `asyncio.wait_for` en `app/routes/chat.py`) — sin `real_asyncio=True` esto
 puede colgar o romper el test. Se usa siempre `freeze_time(..., real_asyncio=True)`
 en estos tests por esa razón.
+
+## Cost tracking: SQLAlchemy async + Alembic, no `asyncpg` directo
+
+Para Fase 5 se usó SQLAlchemy 2.0 (async, driver `asyncpg`) en vez de
+`asyncpg` puro. Trade-off: `asyncpg` directo sería más liviano y algo más
+rápido, pero las "migraciones simples" pedidas necesitarían SQL a mano
+versionado manualmente. SQLAlchemy + Alembic da autogeneración de
+migraciones a partir de los modelos (`alembic revision --autogenerate`), es
+el estándar de facto en proyectos FastAPI, y no se pierde nada de async
+porque `asyncpg` sigue siendo el driver por debajo. Para tests se usa
+`aiosqlite` (SQLite en memoria) en vez de Postgres real — ver entrada
+siguiente.
+
+## Tabla de precios: valores de referencia, no tiempo real
+
+`app/services/pricing.py` tiene un diccionario hardcodeado de USD por 1M
+tokens. Precios consultados el 2026-09-11 en fuentes oficiales:
+`gpt-4o-mini` $0.15/$0.60 y `gpt-4o` $2.50/$10.00 (input/output,
+developers.openai.com/api/docs/pricing); `gemini-3.5-flash-lite`
+$0.30/$2.50 y `gemini-3.5-flash` $1.50/$9.00 (ai.google.dev/gemini-api/docs/pricing).
+Estos precios cambian con el tiempo y no hay ningún mecanismo que los
+mantenga sincronizados — `estimated_cost_usd` es una estimación de
+referencia para tener una noción de costo relativo entre providers, no una
+cifra de facturación exacta. Un modelo sin precio cargado calcula costo 0
+y loguea un `WARNING`, en vez de fallar.
+
+## `BackgroundTasks` se pierden si el endpoint hace `raise HTTPException`
+
+Verificado con código: si un endpoint de FastAPI agrega una tarea con
+`background_tasks.add_task(...)` y después hace `raise HTTPException(...)`,
+esa tarea **nunca se ejecuta** — Starlette solo corre las background tasks
+adjuntas a la `Response` que efectivamente se envía, y una excepción no
+lleva esas tasks consigo. Por eso, en `app/routes/chat.py`, el camino de
+"ambos providers fallaron" ya no hace `raise HTTPException(...)`: devuelve
+`JSONResponse(status_code=..., content={"detail": ...}, background=background_tasks)`
+explícitamente, que sí ejecuta la tarea de `record_usage` adjunta. El
+camino de éxito no necesitó este cambio: devolver el modelo Pydantic normal
+(con `response_model` en el decorador) sí preserva las background tasks
+acumuladas, se confirmó con código antes de asumirlo.
+
+## No se trackean los `RoutingError` (modelo no reconocido)
+
+Un request con un modelo que no matchea ningún prefijo conocido (`gpt-`,
+`gemini-`) nunca llega a intentar ningún provider — no hay costo, tokens,
+ni latencia de provider que registrar. Se decidió no crear una fila en
+`usage_records` para este caso: es un error de input del cliente, no un
+evento operacional de negocio. Lo mismo aplica (sin necesidad de
+documentarlo aparte) a los 401/429 de auth/rate-limit, que ocurren en
+dependencies antes de llegar al cuerpo del endpoint.
+
+## Tests de cost tracking con SQLite en memoria, no Postgres real
+
+Igual que con `fakeredis` en Fase 4, los tests de `test_usage_tracking.py`
+y `test_usage_endpoint.py` reemplazan `async_session_factory` por un engine
+`sqlite+aiosqlite:///:memory:` con `poolclass=StaticPool` (necesario:
+sin esto, distintas sesiones del mismo engine pueden ver bases en memoria
+separadas — es un problema documentado de SQLAlchemy+SQLite en memoria bajo
+pooling). Se probó que el esquema y las queries agregadas (`COUNT`/`SUM`/
+`AVG`/`COALESCE`/`CASE WHEN`) dan el mismo resultado en SQLite que en el
+Postgres real antes de asumir que alcanzaba para testear. Esto evita
+depender de Postgres corriendo en CI; la fidelidad con Postgres real se
+verifica manualmente (ver sección de Verificación del plan de Fase 5), no
+
+**Bug real encontrado al verificar manualmente**: el redirect a SQLite se
+había implementado solo en los dos archivos de test nuevos de esta fase.
+Los tests preexistentes (`test_auth.py`, `test_chat_endpoint.py`,
+`test_chat_fallback.py`, `test_rate_limit.py`) siguen mockeando el provider
+y llegando a una respuesta exitosa, así que la background task de
+`record_usage` corría igual — y como esos archivos no redirigían
+`async_session_factory`, estaban escribiendo filas de test de verdad en el
+Postgres real del desarrollador en cada corrida de `pytest`. Se detectó
+inspeccionando la tabla real después de correr la suite. Fix: el fixture
+de redirect a SQLite se movió a `tests/conftest.py` como `autouse=True`,
+así aplica a **todos** los tests del proyecto sin que cada archivo nuevo
+tenga que acordarse de configurarlo.
+en el test suite automatizado.
+
+## `GET /v1/usage` autenticado por header, no `?api_key=`
+
+Se reutiliza `verify_api_key` (Fase 4, sin modificarlo) vía el mismo header
+`X-API-Key`, en vez de un query param como sugería el pedido original. Un
+query param pondría una API key (un secreto) en logs de acceso, historial
+del navegador y proxies intermedios — mal patrón para credenciales. La key
+autenticada ya determina de quién es el usage a devolver.
