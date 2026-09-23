@@ -19,6 +19,15 @@ class Settings(BaseSettings):
     mock_provider_latency_ms_max: int = 1500
     mock_provider_fail: str = ""
 
+    # Adaptive routing for model="auto" (see DECISIONS.md - "Routing
+    # adaptativo"). Explicit model requests (e.g. "gpt-4o") never go through
+    # this - only the complexity heuristic's provider pick for "auto" can be
+    # overridden, and only with enough real evidence.
+    routing_stats_window_minutes: int = 60
+    routing_min_samples: int = 20
+    routing_error_rate_threshold: float = 0.5
+    routing_latency_degradation_multiplier: float = 2.0
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

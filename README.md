@@ -36,6 +36,7 @@ Provider (Gemini u OpenAI) ──┐
 ## Features
 
 - **Routing con heurística explicable**: longitud del prompt + keywords simples (`code`, `analyze`, `explain in detail`) deciden entre Gemini (rápido/barato) y OpenAI (más potente) cuando `model: "auto"`.
+- **Routing adaptativo sobre esa heurística**: la elección por complejidad puede ser corregida con datos reales de `usage_records` (ventana configurable, default 1h) — si el provider elegido tiene un error rate reciente demasiado alto, o es notablemente más lento que la alternativa, se cambia al otro. Solo actúa con evidencia suficiente (mínimo de muestras configurable); con pocos datos, se respeta la heurística original. Ver [`DECISIONS.md`](./DECISIONS.md).
 - **Fallback automático entre providers**: si el provider elegido falla (error o timeout), se reintenta una vez con el otro antes de devolver un error al cliente.
 - **Auth por API key**: header `X-API-Key` validado contra una lista en `.env`, implementado como dependency explícita de FastAPI.
 - **Rate limiting con Redis**: fixed window counter (`INCR`+`EXPIRE`) por API key, con fail-open si Redis no responde.
@@ -163,6 +164,6 @@ Ver [`DECISIONS.md`](./DECISIONS.md) para el detalle completo de estas y otras ~
 
 - **CI/CD** (✅ hecho): GitHub Actions con Ruff + pytest en cada push/PR a `main`.
 - **Load testing con k6** (✅ hecho): 4 escenarios (tráfico normal, concurrencia hasta 250 VUs, rate limiting, fallback ante fallo de provider), resultados reales en [`benchmarks/README.md`](./benchmarks/README.md).
-- **Routing adaptativo**: pendiente. Usar las estadísticas reales de `usage_records` (latencia, error rate por provider en una ventana temporal) para mejorar la heurística de `model: "auto"`, en vez de solo longitud/keywords.
-- **OpenTelemetry**: pendiente, condicionado a que CI/CD, load testing y routing adaptativo estén terminados primero.
+- **Routing adaptativo** (✅ hecho): `model: "auto"` considera error rate y latencia reales por provider (ventana configurable, mínimo de muestras antes de actuar) además de la heurística por complejidad. Ver `DECISIONS.md`.
+- **OpenTelemetry**: pendiente.
 - **OllamaProvider**: no implementado por limitaciones de hardware disponible durante el desarrollo, pero la interfaz `LLMProvider` ya lo soporta como una extensión trivial (solo implementar `generate()`, sin tocar el resto del gateway) — ver `DECISIONS.md`.

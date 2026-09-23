@@ -24,7 +24,10 @@ async def _aggregate_since(
                 func.sum(case((UsageRecord.used_fallback.is_(True), 1), else_=0)), 0
             ),
             func.coalesce(func.sum(UsageRecord.estimated_cost_usd), 0.0),
-        ).where(UsageRecord.created_at >= cutoff)
+        ).where(
+            UsageRecord.created_at >= cutoff,
+            UsageRecord.is_final_attempt.is_(True),
+        )
     )
     return result.one()
 

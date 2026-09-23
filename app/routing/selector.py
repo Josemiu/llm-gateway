@@ -1,4 +1,6 @@
+import logging
 from dataclasses import dataclass
+from enum import Enum, auto
 
 from app.config import settings
 from app.providers.base import LLMProvider
@@ -6,6 +8,9 @@ from app.providers.gemini_provider import GeminiProvider
 from app.providers.mock_provider import MockProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.schemas.chat import ChatMessage
+from app.services.provider_stats_service import ProviderStats, get_provider_stats
+
+logger = logging.getLogger(__name__)
 
 # Umbral y keywords elegidos a mano, sin tuning con datos reales todavía
 # (ver DECISIONS.md: "Heurística de routing 'auto': simple y explicable, no ML").
@@ -61,9 +66,76 @@ def _build_decision(provider_name: str, model: str) -> RoutingDecision:
     )
 
 
-def select_provider(model: str, messages: list[ChatMessage]) -> RoutingDecision:
+def _other_provider(provider_name: str) -> str:
+    return "openai" if provider_name == "gemini" else "gemini"
+
+
+class _Health(Enum):
+    UNKNOWN = auto()  # fewer than routing_min_samples in the window - no real evidence either way
+    HEALTHY = auto()
+    UNRELIABLE = auto()
+
+
+def _health(stats: ProviderStats | None) -> _Health:
+    if stats is None or stats.sample_count < settings.routing_min_samples:
+        return _Health.UNKNOWN
+    if stats.error_rate > settings.routing_error_rate_threshold:
+        return _Health.UNRELIABLE
+    return _Health.HEALTHY
+
+
+def _apply_adaptive_policy(
+    candidate: str, stats_by_provider: dict[str, ProviderStats]
+) -> str:
+    """Adjusts the complexity heuristic's provider pick using real recent
+    stats from provider_stats_service - reliability first, then latency
+    (see DECISIONS.md - "Routing adaptativo"). Only ever called for
+    model="auto"; explicit model requests never reach this. With fewer than
+    `routing_min_samples` samples a provider's stats are UNKNOWN (not
+    HEALTHY or UNRELIABLE) and never drive a decision - too few requests
+    make error_rate/avg_latency noisy (e.g. 1 failure out of 2 requests
+    looks like a 50% error rate).
+    """
+    other = _other_provider(candidate)
+    candidate_health = _health(stats_by_provider.get(candidate))
+    other_health = _health(stats_by_provider.get(other))
+
+    if candidate_health is _Health.UNRELIABLE and other_health is not _Health.UNRELIABLE:
+        logger.info(
+            "Adaptive routing: '%s' error rate too high recently, preferring '%s'",
+            candidate,
+            other,
+        )
+        return other
+
+    if candidate_health is _Health.HEALTHY and other_health is _Health.HEALTHY:
+        candidate_latency = stats_by_provider[candidate].avg_latency_ms
+        other_latency = stats_by_provider[other].avg_latency_ms
+        if (
+            other_latency > 0
+            and candidate_latency
+            > other_latency * settings.routing_latency_degradation_multiplier
+        ):
+            logger.info(
+                "Adaptive routing: '%s' avg latency (%.0fms) is over %.1fx '%s' "
+                "(%.0fms), preferring '%s'",
+                candidate,
+                candidate_latency,
+                settings.routing_latency_degradation_multiplier,
+                other,
+                other_latency,
+                other,
+            )
+            return other
+
+    return candidate
+
+
+async def select_provider(model: str, messages: list[ChatMessage]) -> RoutingDecision:
     if model == "auto":
         name = "openai" if _is_complex(messages) else "gemini"
+        stats_by_provider = await get_provider_stats(settings.routing_stats_window_minutes)
+        name = _apply_adaptive_policy(name, stats_by_provider)
         return _build_decision(name, PROVIDER_DEFAULT_MODELS[name])
     if model.startswith("gpt-"):
         return _build_decision("openai", model)

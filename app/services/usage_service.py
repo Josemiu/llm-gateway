@@ -21,6 +21,7 @@ async def record_usage(
     latency_ms: int,
     status: str,
     used_fallback: bool,
+    is_final_attempt: bool = True,
 ) -> None:
     estimated_cost = estimate_cost(model_used, input_tokens, output_tokens)
     try:
@@ -37,6 +38,7 @@ async def record_usage(
                     latency_ms=latency_ms,
                     status=status,
                     used_fallback=used_fallback,
+                    is_final_attempt=is_final_attempt,
                 )
             )
             await session.commit()
@@ -60,7 +62,10 @@ async def get_usage_summary(api_key: str) -> UsageSummary:
                     func.sum(case((UsageRecord.used_fallback.is_(True), 1), else_=0)),
                     0,
                 ),
-            ).where(UsageRecord.api_key == api_key)
+            ).where(
+                UsageRecord.api_key == api_key,
+                UsageRecord.is_final_attempt.is_(True),
+            )
         )
         (
             total_requests,

@@ -89,13 +89,67 @@ async def test_both_providers_failing_creates_error_record(usage_db) -> None:
     async with usage_db() as session:
         records = (await session.execute(select(UsageRecord))).scalars().all()
 
-    assert len(records) == 1
-    record = records[0]
-    assert record.status == "error"
-    assert record.used_fallback is True
-    assert record.input_tokens == 0
-    assert record.output_tokens == 0
-    assert record.estimated_cost_usd == 0.0
+    # Two rows now: the primary's (gemini) own failed attempt - shadowed
+    # from /v1/usage and /metrics via is_final_attempt=False, but visible to
+    # provider_stats_service - plus the final outcome, attributed to the
+    # fallback (openai), which is what the client actually received.
+    assert len(records) == 2
+    primary_attempt = next(r for r in records if r.provider == "gemini")
+    assert primary_attempt.status == "error"
+    assert primary_attempt.is_final_attempt is False
+    assert primary_attempt.input_tokens == 0
+    assert primary_attempt.output_tokens == 0
+
+    final_attempt = next(r for r in records if r.provider == "openai")
+    assert final_attempt.status == "error"
+    assert final_attempt.used_fallback is True
+    assert final_attempt.is_final_attempt is True
+    assert final_attempt.input_tokens == 0
+    assert final_attempt.output_tokens == 0
+    assert final_attempt.estimated_cost_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_fallback_success_still_records_the_primary_failure(usage_db) -> None:
+    with (
+        patch.object(
+            GeminiProvider,
+            "generate",
+            AsyncMock(side_effect=GeminiProviderError("Gemini down", 503)),
+        ),
+        patch.object(
+            OpenAIProvider,
+            "generate",
+            AsyncMock(
+                return_value=ProviderResponse(
+                    content="fallback answer",
+                    model="gpt-4o-mini",
+                    input_tokens=3,
+                    output_tokens=2,
+                )
+            ),
+        ),
+    ):
+        response = await _post()
+
+    assert response.status_code == 200
+
+    async with usage_db() as session:
+        records = (await session.execute(select(UsageRecord))).scalars().all()
+
+    # Before this fix, a primary failure followed by a successful fallback
+    # left no trace of gemini's failure anywhere - only the openai success
+    # row was recorded, which made per-provider error rates computed from
+    # this table blind to failures a provider has while acting as primary.
+    assert len(records) == 2
+    primary_attempt = next(r for r in records if r.provider == "gemini")
+    assert primary_attempt.status == "error"
+    assert primary_attempt.is_final_attempt is False
+
+    final_attempt = next(r for r in records if r.provider == "openai")
+    assert final_attempt.status == "success"
+    assert final_attempt.is_final_attempt is True
+    assert final_attempt.used_fallback is True
 
 
 @pytest.mark.asyncio

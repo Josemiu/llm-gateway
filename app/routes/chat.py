@@ -47,7 +47,7 @@ async def create_chat_completion(
     start = time.monotonic()
 
     try:
-        primary = select_provider(request.model, request.messages)
+        primary = await select_provider(request.model, request.messages)
     except RoutingError as exc:
         # Never reached a provider - nothing to track cost/latency-wise.
         raise HTTPException(status_code=400, detail=exc.message) from exc
@@ -65,6 +65,25 @@ async def create_chat_completion(
             primary.provider_name,
             primary_exc.message,
             fallback.provider_name,
+        )
+        # Record the primary's own failed attempt under its own provider
+        # name - without this, per-provider error rates computed from this
+        # table would silently miss every failure a provider has while
+        # acting as primary (see DECISIONS.md). Excluded from /v1/usage and
+        # /metrics via is_final_attempt=False; only provider_stats_service
+        # reads it.
+        background_tasks.add_task(
+            record_usage,
+            api_key=api_key,
+            model_requested=request.model,
+            model_used=primary.model,
+            provider=primary.provider_name,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            status="error",
+            used_fallback=True,
+            is_final_attempt=False,
         )
         try:
             result = await _generate_with_timeout(fallback, request.messages)

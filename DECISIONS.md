@@ -1,3 +1,102 @@
+## Routing adaptativo: reliability → latency → costo (default heurístico)
+
+Para que `model: "auto"` reaccione a la salud real de cada provider (no solo
+al contenido del mensaje), se agregó una capa sobre la heurística existente
+de `app/routing/selector.py` (`_is_complex`, sin tocar) en vez de
+reemplazarla: la heurística sigue eligiendo un candidato por complejidad del
+prompt exactamente como antes; `_apply_adaptive_policy` puede *overridear*
+ese candidato con datos reales de `provider_stats_service.get_provider_stats()`
+(ventana configurable, default `ROUTING_STATS_WINDOW_MINUTES=60`, tomado del
+ejemplo "last 1 hour" del pedido original). Solo aplica a `model: "auto"`
+- un modelo explícito (`model: "gpt-4o-mini"`) nunca pasa por esta lógica,
+igual que antes.
+
+Política, en orden (sin pesos combinados en un solo score - cada capa decide
+independientemente si hay evidencia suficiente para actuar):
+
+1. **Reliability**: si el candidato de la heurística tiene `error_rate` real
+   por encima de `ROUTING_ERROR_RATE_THRESHOLD` (default 0.5 - un provider
+   que falla más de la mitad de sus intentos recientes es más probable que
+   falle de nuevo que no) y el otro provider no está igual de mal, se
+   cambia al otro. Si ambos están mal, se mantiene el candidato original -
+   no hay a dónde más ir, y el fallback reactivo por request (Fase 3, sin
+   tocar) sigue cubriendo ese caso igual que siempre.
+2. **Latency**: si ambos providers están sanos (ver `MIN_SAMPLES` abajo) pero
+   el candidato es más de `ROUTING_LATENCY_DEGRADATION_MULTIPLIER` veces
+   (default 2.0x) más lento que el otro en promedio, se cambia al otro.
+   Se usa un multiplicador relativo, no un umbral fijo en ms: un número
+   absoluto (ej. "500ms") no tiene forma de justificarse sin datos de
+   producción reales, mientras que "2x más lento que la alternativa" es
+   auto-calibrado al entorno real y no depende de qué tan rápido sea el
+   proveedor en general.
+3. **Costo**: si ninguna de las dos capas anteriores actúa, se mantiene el
+   candidato de la heurística original - que ya encima la decisión de costo
+   (prompts simples → Gemini, más barato; prompts complejos → OpenAI, más
+   capaz). No hace falta una tercera regla explícita de costo porque ese
+   trade-off ya está calculado en la heurística existente.
+
+**`ROUTING_MIN_SAMPLES` (default 20)**: por debajo de este número de intentos
+en la ventana, las stats de un provider se tratan como `UNKNOWN` (ni sano ni
+no confiable) y nunca activan un override. Con pocas muestras el error rate
+es ruido puro - 1 fallo sobre 2 intentos ya "parece" 50% de error rate sin
+significar nada. 20 es un punto de partida conservador sin tuning con datos
+reales todavía (mismo espíritu que el umbral de la heurística de
+complejidad), documentado para poder ajustarlo cuando haya tráfico real.
+
+**No es un circuit breaker**: a diferencia de un breaker clásico
+(open/half-open/closed, con cooldown y estado en memoria por proceso), esta
+capa no guarda ningún estado propio - en cada decisión de routing hace una
+query fresca a Postgres (que ya es compartido entre los workers de uvicorn,
+a diferencia de un estado en memoria). Esto es justo lo que la entrada
+"Fallback simple, sin circuit breaker" de más abajo señalaba como el motivo
+para no meter un breaker con estado en Fase 3 (Redis no existía todavía, y
+un breaker en memoria no sería confiable con múltiples workers) - acá el
+problema de estado compartido entre workers directamente no existe, porque
+no hay estado: es solo lectura de datos ya persistidos.
+
+`select_provider()` pasó a ser `async` (antes era sync) porque necesita
+consultar la DB para el caso `"auto"`. Único call site: `app/routes/chat.py`.
+
+**Verificado en vivo** (no solo con tests unitarios): con `LOAD_TEST_MODE=true`
+y `MOCK_PROVIDER_FAIL=gemini` contra el stack real en Docker, tras ~24
+requests fallidas de Gemini en la ventana, el log mostró
+`Adaptive routing: 'gemini' error rate too high recently, preferring 'openai'`
+y la siguiente request fue directo a OpenAI sin intentar Gemini primero (sin
+el WARNING de "Primary provider failed" que aparece en el fallback
+reactivo). Nota de la verificación: el primer intento, con la ventana
+default de 60 minutos, no disparó el override porque el dev DB tenía
+~23,800 filas de Gemini exitosas de los load tests de la Etapa 2 corridos
+minutos antes dentro de esa misma ventana, diluyendo el error rate real
+(0.11% en vez de ~100%) - no es un bug del routing, es la ventana haciendo
+exactamente lo que tiene que hacer (promediar sobre datos reales); se repitió
+con `ROUTING_STATS_WINDOW_MINUTES=2` para aislar la verificación de ese
+ruido de datos de desarrollo.
+
+## Bug real: `usage_records` no registraba el fallo del provider primario
+
+Al diseñar el routing adaptativo (necesita error rate real por provider) se
+encontró que `app/routes/chat.py` solo grababa **una** fila de
+`usage_records` por request HTTP, atribuida siempre al provider que produjo
+el resultado final (el fallback, si hubo uno). El fallo del provider
+*primario* en un request que terminó en fallback - exitoso o no - nunca
+quedaba registrado bajo el nombre del primario. Consecuencia real: una query
+del tipo `WHERE provider = 'openai' AND status = 'error'` solo capturaba los
+casos en que OpenAI fallaba actuando como *fallback*, no como primario - que
+es exactamente el escenario que el routing adaptativo necesita detectar
+("¿debería intentar este provider primero?"). Esto también afectaba (de
+forma más sutil) la interpretación de `/v1/usage` y `/metrics`, aunque sus
+totales de requests seguían siendo correctos porque siempre hubo exactamente
+una fila por request.
+
+Fix: se agregó `usage_records.is_final_attempt: bool` (default `true`,
+migración `7ead1fbc7c58`, aditiva). `chat.py` ahora graba una fila adicional
+con `is_final_attempt=False` para el intento fallido del primario, además de
+la fila de siempre para el resultado final. `usage_service.get_usage_summary`
+y `metrics_service._aggregate_since` agregan `WHERE is_final_attempt = true`
+para seguir significando exactamente lo mismo que antes ("1 fila = 1
+respuesta al cliente"); solo `provider_stats_service` (nuevo, para routing
+adaptativo) lee todas las filas, sin ese filtro.
+
 ## Load testing con `MockProvider`, no contra OpenAI/Gemini reales
 
 Para los 4 escenarios de k6 (`load-tests/`) se necesitaba generar cientos o
