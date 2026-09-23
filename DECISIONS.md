@@ -1,3 +1,36 @@
+## Bug real: migración `8d2dcb772e99` rompía `docker compose up` desde cero
+
+Durante el cierre del proyecto (Etapa 5) se verificó `docker compose up`
+desde un estado realmente limpio (`docker compose down -v`, volumen de
+Postgres borrado) por primera vez desde la Fase 5. El servicio `migrate`
+falló: `alembic.exceptions... asyncpg.exceptions.UndefinedTableError: table
+"t" does not exist`. Causa: la migración `8d2dcb772e99_index_usage_records_created_at.py`
+(autogenerada en la Fase 5 al agregar el índice en `created_at`) incluía
+`op.drop_table('t')` - una tabla `t` que nunca fue parte de ningún modelo ni
+de la migración inicial (`88c2522ef01f`). Era ruido de `alembic revision
+--autogenerate` comparando contra una base de desarrollo que en ese momento
+tenía una tabla `t` suelta (probablemente un experimento manual del
+desarrollador, nunca versionado) - Alembic la interpretó como "esto no
+debería existir" y generó un `DROP TABLE` para ella. En el Postgres de
+desarrollo usado hasta ahora, esa tabla `t` efectivamente existía por
+casualidad, así que `alembic upgrade head` "funcionaba" - pero nunca se
+había probado contra una base realmente nueva (como la vería cualquiera
+clonando el repo), donde el `DROP TABLE t` falla porque la tabla no existe.
+
+Fix: se removieron `op.drop_table('t')` del `upgrade()` y su contraparte
+`op.create_table('t', ...)` del `downgrade()` en esa migración - lo único
+que esa migración debe hacer es crear el índice (y en `downgrade`,
+borrarlo). Se optó por editar la migración histórica directamente, en vez
+de agregar una migración nueva que corrija la anterior: este es un proyecto
+de portfolio con una sola instancia de Postgres de desarrollo (nunca
+desplegado en ningún otro entorno), así que no hay una base de datos real
+ya migrada con el bug que se rompería al reescribir el historial - el costo
+de una migración "parche" extra para corregir un artefacto de autogenerate
+que nunca debió existir no se justificaba. Verificado corriendo
+`docker compose up -d --build` desde cero después del fix: las 3
+migraciones (`88c2522ef01f` → `8d2dcb772e99` → `7ead1fbc7c58`) corren limpio,
+exit code 0.
+
 ## OpenTelemetry: spans manuales por capa + auto-instrumentación de FastAPI, Jaeger vía OTLP
 
 Antes de esta etapa, `/metrics` solo daba latencia end-to-end agregada - no

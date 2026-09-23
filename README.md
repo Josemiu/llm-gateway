@@ -16,7 +16,7 @@ Auth (X-API-Key header) ──────── 401 si falta o es inválida
 Rate Limit (Redis, fixed window) ─ 429 si se supera el límite
   │
   ▼
-Routing (heurística "auto" o prefijo de modelo explícito)
+Routing (heurística "auto" + ajuste adaptativo con stats reales, o prefijo de modelo explícito)
   │
   ▼
 Provider (Gemini u OpenAI) ──┐
@@ -30,6 +30,8 @@ Provider (Gemini u OpenAI) ──┐
              ▼
          Response
 ```
+
+Cada capa (auth, rate limit, routing, provider, DB) emite su propio span de OpenTelemetry, exportado a Jaeger cuando `OTEL_ENABLED=true` — ver sección de Observability más abajo.
 
 `GET /v1/usage` y `GET /metrics` leen de la misma tabla de Postgres (`usage_records`) para exponer agregados por API key y globales, respectivamente.
 
@@ -46,7 +48,7 @@ Provider (Gemini u OpenAI) ──┐
 
 ## Stack
 
-- Python 3.11+, FastAPI, Pydantic v2
+- Python 3.13, FastAPI, Pydantic v2
 - PostgreSQL 16 (cost tracking), Redis 7 (rate limiting)
 - SQLAlchemy 2.0 (async, driver `asyncpg`) + Alembic para migraciones
 - Docker / docker-compose (Redis, Postgres y Jaeger en desarrollo local; el gateway también corre dockerizado — ver `docker-compose.yml`)
@@ -161,13 +163,25 @@ curl http://localhost:8000/metrics
 - **Rate limiting fail-open**: si Redis no responde, la request pasa sin aplicar el límite (con un `WARNING` en logs) en vez de tirar el gateway completo — Redis todavía no es infraestructura de alta disponibilidad en este proyecto.
 - **Tests aislados con SQLite + `StaticPool`**: toda la suite corre sin depender de Postgres/Redis reales (`fakeredis` + SQLite en memoria), verificando explícitamente que las queries agregadas dan el mismo resultado en ambos dialectos antes de confiar en el atajo.
 - **Un solo punto de patch para la sesión de DB**: los módulos de servicio acceden vía `database.async_session_factory()` (no importan el nombre directo), así los tests parchean un único lugar canónico y ningún módulo nuevo puede "olvidarse" de quedar aislado de la base real — esto costó un bug real (tests escribiendo en Postgres de verdad) que quedó documentado.
+- **Bug real: el fallo del provider primario no quedaba registrado**: antes de construir el routing adaptativo se descubrió que `usage_records` solo grababa una fila por request, atribuida siempre al provider que dio el resultado final — el fallo del primario, cuando disparaba un fallback (exitoso o no), nunca quedaba bajo su propio nombre. Eso hacía imposible calcular un error rate real por provider. Se agregó `is_final_attempt` (migración aditiva) para distinguir "intento" de "respuesta al cliente" sin cambiar el significado de `/v1/usage` ni `/metrics`.
+- **Routing adaptativo sin pesos mágicos**: la heurística por complejidad de Fase 3 se mantiene intacta; encima se agregó una capa que solo actúa con evidencia real (mínimo de muestras configurable) y en orden fijo — reliability primero (error rate), después latencia (con un multiplicador relativo, no un umbral en ms inventado), costo ya implícito en la heurística. No es un circuit breaker: no guarda estado propio, lee Postgres en cada decisión.
+- **Load testing sin gastar créditos reales**: los 4 escenarios de k6 corren contra un `MockProvider` (activado solo con `LOAD_TEST_MODE=true`) en vez de OpenAI/Gemini reales — se descartó explícitamente usar las APIs reales porque la key de OpenAI configurada no tiene créditos (confirmado con una llamada real) y porque el escenario de concurrencia (250 VUs) habría generado costo real y chocado con los rate limits de los providers en vez de medir el overhead propio del gateway.
+- **Bug real: `docker compose up` desde cero fallaba**: al cerrar el proyecto se probó por primera vez un `docker compose up` contra un volumen de Postgres realmente vacío (no el de desarrollo, ya usado desde la Fase 5). Una migración de la Fase 5 tenía un `DROP TABLE t` arrastrado por error de un `autogenerate` sobre una base sucia — nunca se había notado porque esa tabla `t` ya existía por casualidad en el Postgres de desarrollo. Corregido y reverificado desde cero.
 
-Ver [`DECISIONS.md`](./DECISIONS.md) para el detalle completo de estas y otras ~20 decisiones documentadas a lo largo del desarrollo.
+Ver [`DECISIONS.md`](./DECISIONS.md) para el detalle completo de estas y otras ~25 decisiones documentadas a lo largo del desarrollo.
 
-## Roadmap / qué falta
+## Estado del proyecto
 
-- **CI/CD** (✅ hecho): GitHub Actions con Ruff + pytest en cada push/PR a `main`.
-- **Load testing con k6** (✅ hecho): 4 escenarios (tráfico normal, concurrencia hasta 250 VUs, rate limiting, fallback ante fallo de provider), resultados reales en [`benchmarks/README.md`](./benchmarks/README.md).
-- **Routing adaptativo** (✅ hecho): `model: "auto"` considera error rate y latencia reales por provider (ventana configurable, mínimo de muestras antes de actuar) además de la heurística por complejidad. Ver `DECISIONS.md`.
-- **OpenTelemetry** (✅ hecho): tracing distribuido por capa (auth, rate limit, routing, provider, DB) exportado a Jaeger vía OTLP, verificado con un trace real. Ver `DECISIONS.md`.
-- **OllamaProvider**: no implementado por limitaciones de hardware disponible durante el desarrollo, pero la interfaz `LLMProvider` ya lo soporta como una extensión trivial (solo implementar `generate()`, sin tocar el resto del gateway) — ver `DECISIONS.md`.
+Cerrado como proyecto de portfolio. Todas las etapas planeadas están completas:
+
+- **CI/CD**: GitHub Actions con Ruff + pytest en cada push/PR a `main`.
+- **Load testing con k6**: 4 escenarios (tráfico normal, concurrencia hasta 250 VUs, rate limiting, fallback ante fallo de provider), resultados reales en [`benchmarks/README.md`](./benchmarks/README.md).
+- **Routing adaptativo**: `model: "auto"` considera error rate y latencia reales por provider (ventana configurable, mínimo de muestras antes de actuar) además de la heurística por complejidad.
+- **Observability**: tracing distribuido por capa (auth, rate limit, routing, provider, DB) exportado a Jaeger vía OTLP, verificado con un trace real end-to-end.
+
+Ver [`DECISIONS.md`](./DECISIONS.md) para el detalle de cada decisión.
+
+**Fuera de alcance, por decisión explícita** (no por falta de tiempo):
+
+- **OllamaProvider**: no implementado por limitaciones de hardware disponible durante el desarrollo, pero la interfaz `LLMProvider` ya lo soporta como una extensión trivial (solo implementar `generate()`, sin tocar el resto del gateway).
+- Semantic caching, Kubernetes y microservicios adicionales quedaron fuera de alcance desde el planteo del proyecto — no había una razón técnica concreta para este gateway que los justificara. Tampoco se agregó un circuit breaker con estado propio: el routing adaptativo cubre ese caso de uso leyendo Postgres en cada decisión, sin necesitar estado compartido entre workers (ver `DECISIONS.md`).
