@@ -6,6 +6,7 @@ from app.schemas.usage import UsageSummary
 from app.services import database
 from app.services.models import UsageRecord
 from app.services.pricing import estimate_cost
+from app.telemetry import tracer
 
 logger = logging.getLogger(__name__)
 
@@ -23,30 +24,32 @@ async def record_usage(
     used_fallback: bool,
     is_final_attempt: bool = True,
 ) -> None:
-    estimated_cost = estimate_cost(model_used, input_tokens, output_tokens)
-    try:
-        async with database.async_session_factory() as session:
-            session.add(
-                UsageRecord(
-                    api_key=api_key,
-                    model_requested=model_requested,
-                    model_used=model_used,
-                    provider=provider,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    estimated_cost_usd=estimated_cost,
-                    latency_ms=latency_ms,
-                    status=status,
-                    used_fallback=used_fallback,
-                    is_final_attempt=is_final_attempt,
+    with tracer.start_as_current_span("db.record_usage") as span:
+        span.set_attribute("provider.name", provider)
+        estimated_cost = estimate_cost(model_used, input_tokens, output_tokens)
+        try:
+            async with database.async_session_factory() as session:
+                session.add(
+                    UsageRecord(
+                        api_key=api_key,
+                        model_requested=model_requested,
+                        model_used=model_used,
+                        provider=provider,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        estimated_cost_usd=estimated_cost,
+                        latency_ms=latency_ms,
+                        status=status,
+                        used_fallback=used_fallback,
+                        is_final_attempt=is_final_attempt,
+                    )
                 )
-            )
-            await session.commit()
-    except Exception:
-        # This runs as a background task after the response is already on
-        # its way to the client - a DB failure here must never surface to
-        # the caller, only get logged.
-        logger.exception("Failed to record usage for api_key=%s", api_key)
+                await session.commit()
+        except Exception:
+            # This runs as a background task after the response is already
+            # on its way to the client - a DB failure here must never
+            # surface to the caller, only get logged.
+            logger.exception("Failed to record usage for api_key=%s", api_key)
 
 
 async def get_usage_summary(api_key: str) -> UsageSummary:

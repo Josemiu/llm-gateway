@@ -10,6 +10,7 @@ from app.providers.base import ProviderError, ProviderResponse
 from app.routing.selector import RoutingDecision, RoutingError, select_fallback, select_provider
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Usage
 from app.services.usage_service import record_usage
+from app.telemetry import tracer
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -20,17 +21,20 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 async def _generate_with_timeout(
     decision: RoutingDecision, messages: list[ChatMessage]
 ) -> ProviderResponse:
-    try:
-        return await asyncio.wait_for(
-            decision.provider.generate(model=decision.model, messages=messages),
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-    except TimeoutError as exc:
-        raise ProviderError(
-            f"{decision.provider_name} did not respond within "
-            f"{REQUEST_TIMEOUT_SECONDS:.0f}s",
-            504,
-        ) from exc
+    with tracer.start_as_current_span("provider.generate") as span:
+        span.set_attribute("provider.name", decision.provider_name)
+        span.set_attribute("provider.model", decision.model)
+        try:
+            return await asyncio.wait_for(
+                decision.provider.generate(model=decision.model, messages=messages),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise ProviderError(
+                f"{decision.provider_name} did not respond within "
+                f"{REQUEST_TIMEOUT_SECONDS:.0f}s",
+                504,
+            ) from exc
 
 
 # Pipeline: Auth (verify_api_key) -> Rate Limit (enforce_rate_limit) -> Routing

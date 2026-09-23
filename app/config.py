@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     routing_error_rate_threshold: float = 0.5
     routing_latency_degradation_multiplier: float = 2.0
 
+    # Tracing (see DECISIONS.md - "OpenTelemetry"). Default false: importing
+    # app.main never tries to reach an exporter unless explicitly enabled,
+    # so tests and plain local dev (no Jaeger running) are unaffected.
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4318"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

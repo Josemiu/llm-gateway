@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from app.routes.chat import router as chat_router
 from app.routes.metrics import router as metrics_router
 from app.routes.usage import router as usage_router
+from app.telemetry import setup_tracing
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -14,3 +15,5 @@ app = FastAPI(title="LLM Gateway")
 app.include_router(chat_router)
 app.include_router(usage_router)
 app.include_router(metrics_router)
+
+setup_tracing(app)

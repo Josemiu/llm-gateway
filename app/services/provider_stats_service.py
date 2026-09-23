@@ -5,6 +5,7 @@ from sqlalchemy import case, func, select
 
 from app.services import database
 from app.services.models import UsageRecord
+from app.telemetry import tracer
 
 
 @dataclass(frozen=True)
@@ -25,37 +26,39 @@ async def get_provider_stats(window_minutes: int) -> dict[str, ProviderStats]:
     fast failure would otherwise pull the average down and make a provider
     look faster than it actually is when it works.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    with tracer.start_as_current_span("db.get_provider_stats") as span:
+        span.set_attribute("window_minutes", window_minutes)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
 
-    async with database.async_session_factory() as session:
-        rows = (
-            await session.execute(
-                select(
-                    UsageRecord.provider,
-                    func.count(),
-                    func.coalesce(
-                        func.sum(case((UsageRecord.status == "error", 1), else_=0)), 0
-                    ),
-                    func.coalesce(
-                        func.avg(
-                            case(
-                                (UsageRecord.status == "success", UsageRecord.latency_ms)
-                            )
+        async with database.async_session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        UsageRecord.provider,
+                        func.count(),
+                        func.coalesce(
+                            func.sum(case((UsageRecord.status == "error", 1), else_=0)), 0
                         ),
-                        0.0,
-                    ),
+                        func.coalesce(
+                            func.avg(
+                                case(
+                                    (UsageRecord.status == "success", UsageRecord.latency_ms)
+                                )
+                            ),
+                            0.0,
+                        ),
+                    )
+                    .where(UsageRecord.created_at >= cutoff)
+                    .group_by(UsageRecord.provider)
                 )
-                .where(UsageRecord.created_at >= cutoff)
-                .group_by(UsageRecord.provider)
-            )
-        ).all()
+            ).all()
 
-    return {
-        provider: ProviderStats(
-            provider=provider,
-            sample_count=count,
-            error_rate=round(error_count / count, 4) if count else 0.0,
-            avg_latency_ms=round(avg_latency, 1),
-        )
-        for provider, count, error_count, avg_latency in rows
-    }
+        return {
+            provider: ProviderStats(
+                provider=provider,
+                sample_count=count,
+                error_rate=round(error_count / count, 4) if count else 0.0,
+                avg_latency_ms=round(avg_latency, 1),
+            )
+            for provider, count, error_count, avg_latency in rows
+        }

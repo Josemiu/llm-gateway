@@ -42,13 +42,15 @@ Provider (Gemini u OpenAI) ──┐
 - **Rate limiting con Redis**: fixed window counter (`INCR`+`EXPIRE`) por API key, con fail-open si Redis no responde.
 - **Cost tracking en Postgres**: cada request queda registrada (tokens, costo estimado, latencia, éxito/error, si usó fallback) sin bloquear la respuesta.
 - **Endpoint de métricas**: agregados globales con ventana de los últimos 60s y del día corrido (UTC).
+- **Tracing distribuido con OpenTelemetry**: un span por capa (auth, rate limiting, routing, llamada al provider, escritura en Postgres) exportado a Jaeger vía OTLP — permite ver dónde se va el tiempo dentro de un request individual, algo que `/metrics` (agregado) no muestra. Desactivado por default fuera de Docker (`OTEL_ENABLED=false`); UI en `http://localhost:16686` al levantar el stack completo. Ver [`DECISIONS.md`](./DECISIONS.md).
 
 ## Stack
 
 - Python 3.11+, FastAPI, Pydantic v2
 - PostgreSQL 16 (cost tracking), Redis 7 (rate limiting)
 - SQLAlchemy 2.0 (async, driver `asyncpg`) + Alembic para migraciones
-- Docker / docker-compose (Redis y Postgres en desarrollo local)
+- Docker / docker-compose (Redis, Postgres y Jaeger en desarrollo local; el gateway también corre dockerizado — ver `docker-compose.yml`)
+- OpenTelemetry + Jaeger (tracing distribuido, opcional)
 - Providers: OpenAI SDK y Google GenAI SDK (Gemini)
 
 ## Cómo levantarlo localmente
@@ -61,12 +63,14 @@ python -m venv venv
 venv\Scripts\activate          # Windows (o `source venv/bin/activate` en Linux/Mac)
 pip install -r requirements.txt
 
-docker compose up -d           # levanta Redis (6379) y Postgres (5432)
+docker compose up -d           # levanta Redis (6379), Postgres (5432) y Jaeger (16686)
 
 cp .env.example .env
 # completar en .env: OPENAI_API_KEY, GEMINI_API_KEY, VALID_API_KEYS
 # (REDIS_URL, RATE_LIMIT_PER_MINUTE y DATABASE_URL ya traen defaults que
 # matchean el docker-compose.yml, no hace falta tocarlos en local)
+# OTEL_ENABLED=false por default - poner en true para ver traces en
+# http://localhost:16686 (Jaeger ya está arriba del `docker compose up -d`)
 
 alembic upgrade head            # crea la tabla usage_records en Postgres
 
@@ -165,5 +169,5 @@ Ver [`DECISIONS.md`](./DECISIONS.md) para el detalle completo de estas y otras ~
 - **CI/CD** (✅ hecho): GitHub Actions con Ruff + pytest en cada push/PR a `main`.
 - **Load testing con k6** (✅ hecho): 4 escenarios (tráfico normal, concurrencia hasta 250 VUs, rate limiting, fallback ante fallo de provider), resultados reales en [`benchmarks/README.md`](./benchmarks/README.md).
 - **Routing adaptativo** (✅ hecho): `model: "auto"` considera error rate y latencia reales por provider (ventana configurable, mínimo de muestras antes de actuar) además de la heurística por complejidad. Ver `DECISIONS.md`.
-- **OpenTelemetry**: pendiente.
+- **OpenTelemetry** (✅ hecho): tracing distribuido por capa (auth, rate limit, routing, provider, DB) exportado a Jaeger vía OTLP, verificado con un trace real. Ver `DECISIONS.md`.
 - **OllamaProvider**: no implementado por limitaciones de hardware disponible durante el desarrollo, pero la interfaz `LLMProvider` ya lo soporta como una extensión trivial (solo implementar `generate()`, sin tocar el resto del gateway) — ver `DECISIONS.md`.

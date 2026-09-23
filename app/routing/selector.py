@@ -9,6 +9,7 @@ from app.providers.mock_provider import MockProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.schemas.chat import ChatMessage
 from app.services.provider_stats_service import ProviderStats, get_provider_stats
+from app.telemetry import tracer
 
 logger = logging.getLogger(__name__)
 
@@ -132,16 +133,23 @@ def _apply_adaptive_policy(
 
 
 async def select_provider(model: str, messages: list[ChatMessage]) -> RoutingDecision:
-    if model == "auto":
-        name = "openai" if _is_complex(messages) else "gemini"
-        stats_by_provider = await get_provider_stats(settings.routing_stats_window_minutes)
-        name = _apply_adaptive_policy(name, stats_by_provider)
-        return _build_decision(name, PROVIDER_DEFAULT_MODELS[name])
-    if model.startswith("gpt-"):
-        return _build_decision("openai", model)
-    if model.startswith("gemini-"):
-        return _build_decision("gemini", model)
-    raise RoutingError(f"Cannot map model '{model}' to a known provider")
+    with tracer.start_as_current_span("routing.select_provider") as span:
+        span.set_attribute("model.requested", model)
+        if model == "auto":
+            name = "openai" if _is_complex(messages) else "gemini"
+            stats_by_provider = await get_provider_stats(
+                settings.routing_stats_window_minutes
+            )
+            name = _apply_adaptive_policy(name, stats_by_provider)
+            span.set_attribute("provider.selected", name)
+            return _build_decision(name, PROVIDER_DEFAULT_MODELS[name])
+        if model.startswith("gpt-"):
+            span.set_attribute("provider.selected", "openai")
+            return _build_decision("openai", model)
+        if model.startswith("gemini-"):
+            span.set_attribute("provider.selected", "gemini")
+            return _build_decision("gemini", model)
+        raise RoutingError(f"Cannot map model '{model}' to a known provider")
 
 
 def select_fallback(primary_provider_name: str) -> RoutingDecision:

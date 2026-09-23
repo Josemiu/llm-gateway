@@ -1,3 +1,52 @@
+## OpenTelemetry: spans manuales por capa + auto-instrumentación de FastAPI, Jaeger vía OTLP
+
+Antes de esta etapa, `/metrics` solo daba latencia end-to-end agregada - no
+había forma de ver, para un request lento en particular, si el tiempo se iba
+en rate limiting, en la query de stats del routing adaptativo, en la llamada
+al provider o en el write de cost tracking. Ese es el problema concreto que
+resuelve el tracing, no una tecnología agregada porque sí.
+
+Diseño: `FastAPIInstrumentor.instrument_app(app)` (paquete
+`opentelemetry-instrumentation-fastapi`) da el span raíz por request
+automáticamente - no tiene sentido reimplementar eso a mano. Sobre eso, se
+agregaron spans manuales (`tracer.start_as_current_span(...)`) en cada capa
+pedida: `auth.verify_api_key`, `rate_limit.enforce`, `routing.select_provider`
+(con `db.get_provider_stats` anidado adentro, porque el routing adaptativo
+consulta la DB), `provider.generate` (en `_generate_with_timeout` de
+`chat.py` - un solo punto cubre OpenAI/Gemini/Mock sin duplicar el span en
+cada provider), y `db.record_usage`.
+
+**Exportador**: OTLP sobre HTTP (`opentelemetry-exporter-otlp-proto-http`) a
+Jaeger, en vez del exportador Jaeger nativo (deprecado en favor de OTLP
+desde hace tiempo - Jaeger acepta OTLP directamente desde la v1.35). Un solo
+backend, como pedía el objetivo original (no Jaeger + Tempo a la vez).
+Imagen fijada a `jaegertracing/all-in-one:1.76.0` (confirmada real contra
+Docker Hub, no adivinada) - nuevo servicio en `docker-compose.yml`, UI en
+`localhost:16686`.
+
+**`settings.otel_enabled` (default `false`)**: `app/telemetry.py` expone un
+`tracer` global que cualquier módulo puede importar y usar sin condicionales
+propios - sin un `TracerProvider` configurado, la API de OpenTelemetry cae
+sola a un tracer no-op (sin overhead real, sin intentar exportar nada). Solo
+`setup_tracing()` en `app/main.py` es condicional: configura el exportador
+real y instrumenta FastAPI únicamente si `OTEL_ENABLED=true`. Esto evita que
+los 48 tests o un `uvicorn --reload` local sin Jaeger corriendo intenten
+conectarse a un exportador inexistente - cero cambios de comportamiento por
+default. En `.env.docker.example` queda `true` (Jaeger ya es parte del stack
+completo de Docker); en `.env.example` (dev local sin Docker) queda `false`.
+
+**Verificado en vivo, no solo "debería andar"**: con el stack completo en
+Docker (`OTEL_ENABLED=true`), un request real a `/v1/chat/completions`
+generó un trace consultado directo contra la API de Jaeger
+(`GET /api/traces?service=llm-gateway`) con la jerarquía exacta esperada:
+`POST /v1/chat/completions` (raíz, auto-instrumentado) → `auth.verify_api_key`,
+`rate_limit.enforce`, `routing.select_provider` (con `db.get_provider_stats`
+anidado), `provider.generate`, y - el caso que generaba más dudas, por
+tratarse de una `BackgroundTask` que corre después de enviada la respuesta -
+`db.record_usage`, que efectivamente aparece anidado bajo el span
+`BackgroundTask record_usage` que `FastAPIInstrumentor` genera automáticamente,
+sin quedar como un trace huérfano.
+
 ## Routing adaptativo: reliability → latency → costo (default heurístico)
 
 Para que `model: "auto"` reaccione a la salud real de cada provider (no solo
