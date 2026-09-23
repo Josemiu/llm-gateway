@@ -1,3 +1,17 @@
+## CI: `requirements-dev.txt` separado, no todo en `requirements.txt`
+
+Ruff se agregó como dependencia de lint en `requirements-dev.txt` en vez de
+sumarlo a `requirements.txt`. El `Dockerfile` (`docker/Dockerfile`) instala
+únicamente `requirements.txt` para construir la imagen de producción del
+gateway; una herramienta de desarrollo (linter) no tiene motivo para viajar
+en esa imagen. El workflow de CI (`.github/workflows/ci.yml`) instala ambos
+archivos. Reglas de Ruff elegidas: `E`, `F`, `I` (pycodestyle, pyflakes,
+import sorting) — el set por defecto, sin reglas adicionales agresivas,
+porque el objetivo de esta etapa es detectar errores reales y mantener
+imports ordenados, no imponer un estilo extenso sin evidencia de que haga
+falta. Se excluye `alembic/versions/` del lint porque son migraciones
+autogeneradas por Alembic, no código escrito a mano.
+
 ## Thinking de Gemini: no se fuerza a apagado (revertido)
 
 Se había intentado deshabilitar el thinking de Gemini en el MVP pasando

@@ -1,5 +1,7 @@
 # LLM Gateway
 
+[![CI](https://github.com/Josemiu/llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/Josemiu/llm-gateway/actions/workflows/ci.yml)
+
 Gateway de LLMs con routing inteligente, fallback automático entre providers, auth, rate limiting, cost tracking y métricas — no un wrapper de ChatGPT.
 
 ## Arquitectura
@@ -75,6 +77,10 @@ Para correr los tests (no dependen de Redis/Postgres reales — usan `fakeredis`
 pytest tests/ -v
 ```
 
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) corre en cada push/PR a `main`: instala `requirements.txt` + `requirements-dev.txt`, ejecuta `ruff check .` y despues `pytest tests/ -v`. No requiere Redis/Postgres reales (mismo motivo que los tests locales), así que no hay servicios levantados en el workflow.
+
 ## Ejemplos de uso
 
 **Chat completion** (routing automático):
@@ -146,5 +152,8 @@ Ver [`DECISIONS.md`](./DECISIONS.md) para el detalle completo de estas y otras ~
 
 ## Roadmap / qué falta
 
-- **Fase 7** (no implementada): exportar métricas en formato Prometheus + dashboard de Grafana, y Dockerizar el gateway mismo (hoy Docker solo levanta Redis y Postgres, la app corre con `uvicorn` directo).
+- **CI/CD** (✅ hecho): GitHub Actions con Ruff + pytest en cada push/PR a `main`.
+- **Load testing con k6**: pendiente. Escenarios de tráfico normal, concurrencia creciente, rate limiting y fallback ante fallo de provider, con resultados reales documentados en `benchmarks/`.
+- **Routing adaptativo**: pendiente. Usar las estadísticas reales de `usage_records` (latencia, error rate por provider en una ventana temporal) para mejorar la heurística de `model: "auto"`, en vez de solo longitud/keywords.
+- **OpenTelemetry**: pendiente, condicionado a que CI/CD, load testing y routing adaptativo estén terminados primero.
 - **OllamaProvider**: no implementado por limitaciones de hardware disponible durante el desarrollo, pero la interfaz `LLMProvider` ya lo soporta como una extensión trivial (solo implementar `generate()`, sin tocar el resto del gateway) — ver `DECISIONS.md`.
