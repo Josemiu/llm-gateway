@@ -1,3 +1,59 @@
+## Load testing con `MockProvider`, no contra OpenAI/Gemini reales
+
+Para los 4 escenarios de k6 (`load-tests/`) se necesitaba generar cientos o
+miles de requests de chat completions sin depender de los providers reales.
+Se evaluó y descartó llamar a las APIs reales: al intentar medir latencia
+real de referencia para calibrar el mock, una llamada real a OpenAI
+(`gpt-4o-mini`) devolvió `429 insufficient_quota` /
+`credit_balance_exhausted` — la API key configurada en este proyecto no
+tiene créditos cargados. Aunque tuviera créditos, el escenario de
+concurrencia (hasta 250 VUs) y el de fallo forzado repetido habrían
+generado cientos de requests de pago y chocado con los rate limits propios
+de los providers, que no son lo que estos tests miden (el objetivo es medir
+el overhead propio del gateway: auth, rate limiting, routing, fallback,
+background task de cost tracking).
+
+Se agregó `app/providers/mock_provider.py` (`MockProvider`), activado
+únicamente con `settings.load_test_mode` (default `false`, sin efecto en
+dev/producción). El branch vive en `app/routing/selector.py::_build_decision`
+y es el único punto de la app que lo conoce. `MockProvider` simula latencia
+con `asyncio.sleep` en un rango configurable
+(`MOCK_PROVIDER_LATENCY_MS_MIN/MAX`, default 200-1500ms — calibrado con 3
+llamadas reales a Gemini que sí funcionaron: 1076/1401/1076ms, avg 1245ms;
+no se pudo calibrar con OpenAI real por el problema de créditos de arriba,
+así que el mismo rango se aplica a ambos providers mockeados) y puede forzar
+el fallo de un provider específico vía `MOCK_PROVIDER_FAIL` (nombre de
+provider, o varios separados por coma) para el escenario D. Los tokens que
+devuelve son una proxy por conteo de palabras, solo para que el cost
+tracking downstream tenga números no-cero con los que trabajar — no son una
+medición real, y los `estimated_cost_usd` que salen de una corrida de load
+testing no reflejan gasto real (ver `benchmarks/README.md`).
+
+## Escenario B (concurrencia) sube el rate limit; Escenario C lo deja en default
+
+El Escenario B de k6 mide capacidad de manejo de concurrencia del gateway
+(FastAPI + Redis + Postgres), no el rate limiter — por eso, solo para esa
+corrida (y para D, que tampoco testea el limiter), se subió
+`RATE_LIMIT_PER_MINUTE` a un valor alto (100000) en `.env.docker` antes de
+levantar el gateway. El Escenario C, que sí testea el rate limiter
+específicamente, corre con el default real (20). Mezclar ambos objetivos en
+un solo escenario habría hecho que el resultado de B fuera "cuántos 429
+tira Redis" en vez de "cuánta concurrencia aguanta el gateway".
+
+**Hallazgo real durante la calibración de C**: la primera corrida de este
+escenario usó `devkey1` y dio 100% de requests rechazadas (esperábamos una
+mezcla ~50/50). Causa: `devkey1` ya había acumulado miles de requests
+durante el Escenario B (corrido minutos antes con el límite elevado) sobre
+la misma key, y el contador fixed-window de Redis (`ratelimit:devkey1`)
+seguía vivo dentro de su ventana de 60s cuando arrancó C con el límite bajo
+de nuevo. No es un bug — es el fixed window counter comportándose tal como
+está documentado (ver entrada "Rate limiting: fixed window counter, no
+token bucket real" más abajo) — pero sí confirma en la práctica que cambiar
+`RATE_LIMIT_PER_MINUTE` en caliente no resetea el estado ya acumulado en
+Redis. Se repitió el escenario con `devkey2` (sin uso previo) para aislar
+la medición; el resultado fue el esperado (20/40 aceptadas, 20/40
+rechazadas, exacto).
+
 ## CI: `requirements-dev.txt` separado, no todo en `requirements.txt`
 
 Ruff se agregó como dependencia de lint en `requirements-dev.txt` en vez de

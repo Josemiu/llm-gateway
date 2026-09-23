@@ -1,0 +1,1 @@
+{"last_60s":{"request_count":129,"requests_per_second":2.15,"avg_latency_ms":878.4,"error_rate":0.0,"fallback_rate":0.9225},"today":{"request_count":47451,"requests_per_second":0.6543815238809757,"avg_latency_ms":862.8,"error_rate":0.0,"fallback_rate":0.0025,"cost_usd":5.249943}}

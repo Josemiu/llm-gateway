@@ -1,5 +1,7 @@
 import pytest
 
+from app.config import settings
+from app.providers.mock_provider import MockProvider
 from app.routing.selector import RoutingError, select_fallback, select_provider
 from app.schemas.chat import ChatMessage
 
@@ -56,3 +58,19 @@ def test_unrecognized_model_raises_routing_error() -> None:
 def test_select_fallback_returns_the_other_provider() -> None:
     assert select_fallback("gemini").provider_name == "openai"
     assert select_fallback("openai").provider_name == "gemini"
+
+
+def test_load_test_mode_uses_mock_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "load_test_mode", True)
+
+    decision = select_provider("auto", _user_message("Hi there"))
+
+    assert isinstance(decision.provider, MockProvider)
+    assert decision.provider_name == "gemini"
+    assert decision.model == "gemini-3.5-flash-lite"
+
+
+def test_load_test_mode_off_uses_real_provider_classes() -> None:
+    decision = select_provider("auto", _user_message("Hi there"))
+
+    assert not isinstance(decision.provider, MockProvider)

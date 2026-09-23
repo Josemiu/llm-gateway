@@ -81,6 +81,15 @@ pytest tests/ -v
 
 GitHub Actions (`.github/workflows/ci.yml`) corre en cada push/PR a `main`: instala `requirements.txt` + `requirements-dev.txt`, ejecuta `ruff check .` y despues `pytest tests/ -v`. No requiere Redis/Postgres reales (mismo motivo que los tests locales), así que no hay servicios levantados en el workflow.
 
+## Performance / Load Testing
+
+El gateway fue probado con [k6](https://k6.io) bajo 4 escenarios (tráfico normal, rampa de concurrencia hasta 250 VUs, rate limiting, y fallo forzado de provider con fallback) contra el stack real en Docker. Para no depender de créditos ni de los rate limits de OpenAI/Gemini reales, estas corridas usan `app/providers/mock_provider.py` (activado solo con `LOAD_TEST_MODE=true`, default `false` — no afecta al gateway en uso normal). Resultados reales, entorno de prueba documentado y metodología completa en [`benchmarks/README.md`](./benchmarks/README.md); scripts en [`load-tests/`](./load-tests/).
+
+Resumen de lo medido (ver el detalle y las salvedades en `benchmarks/README.md`):
+- 0% de errores en los 4 escenarios, incluyendo el pico de 250 VUs concurrentes (p95 = 1.48s).
+- Rate limiting confirmado exacto: 20/40 requests aceptadas, 20/40 rechazadas con 429, con `RATE_LIMIT_PER_MINUTE=20`.
+- Fallback confirmado al 100% (119/119) ante un fallo forzado del provider primario.
+
 ## Ejemplos de uso
 
 **Chat completion** (routing automático):
@@ -153,7 +162,7 @@ Ver [`DECISIONS.md`](./DECISIONS.md) para el detalle completo de estas y otras ~
 ## Roadmap / qué falta
 
 - **CI/CD** (✅ hecho): GitHub Actions con Ruff + pytest en cada push/PR a `main`.
-- **Load testing con k6**: pendiente. Escenarios de tráfico normal, concurrencia creciente, rate limiting y fallback ante fallo de provider, con resultados reales documentados en `benchmarks/`.
+- **Load testing con k6** (✅ hecho): 4 escenarios (tráfico normal, concurrencia hasta 250 VUs, rate limiting, fallback ante fallo de provider), resultados reales en [`benchmarks/README.md`](./benchmarks/README.md).
 - **Routing adaptativo**: pendiente. Usar las estadísticas reales de `usage_records` (latencia, error rate por provider en una ventana temporal) para mejorar la heurística de `model: "auto"`, en vez de solo longitud/keywords.
 - **OpenTelemetry**: pendiente, condicionado a que CI/CD, load testing y routing adaptativo estén terminados primero.
 - **OllamaProvider**: no implementado por limitaciones de hardware disponible durante el desarrollo, pero la interfaz `LLMProvider` ya lo soporta como una extensión trivial (solo implementar `generate()`, sin tocar el resto del gateway) — ver `DECISIONS.md`.

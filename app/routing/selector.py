@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 
+from app.config import settings
 from app.providers.base import LLMProvider
 from app.providers.gemini_provider import GeminiProvider
+from app.providers.mock_provider import MockProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.schemas.chat import ChatMessage
 
@@ -44,9 +46,17 @@ def _is_complex(messages: list[ChatMessage]) -> bool:
 
 
 def _build_decision(provider_name: str, model: str) -> RoutingDecision:
+    # settings.load_test_mode is load-testing-only (see DECISIONS.md and
+    # app/providers/mock_provider.py); false by default so normal dev/prod
+    # routing is unaffected.
+    provider: LLMProvider = (
+        MockProvider(provider_name)
+        if settings.load_test_mode
+        else _PROVIDER_CLASSES[provider_name]()
+    )
     return RoutingDecision(
         provider_name=provider_name,
-        provider=_PROVIDER_CLASSES[provider_name](),
+        provider=provider,
         model=model,
     )
 
