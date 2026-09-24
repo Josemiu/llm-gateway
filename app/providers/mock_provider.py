@@ -3,7 +3,7 @@ import random
 
 from app.config import settings
 from app.providers.base import LLMProvider, ProviderError, ProviderResponse
-from app.schemas.chat import ChatMessage
+from app.schemas.chat import ChatMessage, Tool
 
 
 class MockProviderError(ProviderError):
@@ -23,7 +23,10 @@ class MockProvider(LLMProvider):
         self.provider_name = provider_name
 
     async def generate(
-        self, model: str, messages: list[ChatMessage]
+        self,
+        model: str,
+        messages: list[ChatMessage],
+        tools: list[Tool] | None = None,
     ) -> ProviderResponse:
         forced_failures = {
             name.strip() for name in settings.mock_provider_fail.split(",") if name.strip()
@@ -41,7 +44,7 @@ class MockProvider(LLMProvider):
         )
         await asyncio.sleep(latency_s)
 
-        user_text = " ".join(m.content for m in messages)
+        user_text = " ".join(m.content or "" for m in messages)
         # Rough word-count proxy, only meant to give downstream cost-tracking
         # code non-zero, plausible-looking numbers to work with during a load
         # test - not a real tokenizer.

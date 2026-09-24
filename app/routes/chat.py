@@ -8,7 +8,13 @@ from fastapi.responses import JSONResponse
 from app.middleware.rate_limit import enforce_rate_limit
 from app.providers.base import ProviderError, ProviderResponse
 from app.routing.selector import RoutingDecision, RoutingError, select_fallback, select_provider
-from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Usage
+from app.schemas.chat import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    Tool,
+    Usage,
+)
 from app.services.usage_service import record_usage
 from app.telemetry import tracer
 
@@ -19,14 +25,16 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 async def _generate_with_timeout(
-    decision: RoutingDecision, messages: list[ChatMessage]
+    decision: RoutingDecision, messages: list[ChatMessage], tools: list[Tool] | None
 ) -> ProviderResponse:
     with tracer.start_as_current_span("provider.generate") as span:
         span.set_attribute("provider.name", decision.provider_name)
         span.set_attribute("provider.model", decision.model)
         try:
             return await asyncio.wait_for(
-                decision.provider.generate(model=decision.model, messages=messages),
+                decision.provider.generate(
+                    model=decision.model, messages=messages, tools=tools
+                ),
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
         except TimeoutError as exc:
@@ -59,7 +67,7 @@ async def create_chat_completion(
     used_fallback = False
     attempt = primary
     try:
-        result = await _generate_with_timeout(primary, request.messages)
+        result = await _generate_with_timeout(primary, request.messages, request.tools)
     except ProviderError as primary_exc:
         used_fallback = True
         fallback = select_fallback(primary.provider_name)
@@ -90,7 +98,7 @@ async def create_chat_completion(
             is_final_attempt=False,
         )
         try:
-            result = await _generate_with_timeout(fallback, request.messages)
+            result = await _generate_with_timeout(fallback, request.messages, request.tools)
         except ProviderError as fallback_exc:
             logger.error(
                 "Fallback provider '%s' also failed (%s); no providers left",
@@ -145,6 +153,7 @@ async def create_chat_completion(
     )
     return ChatCompletionResponse(
         content=result.content,
+        tool_calls=result.tool_calls,
         model=result.model,
         usage=Usage(
             input_tokens=result.input_tokens,

@@ -44,6 +44,7 @@ Cada capa (auth, rate limit, routing, provider, DB) emite su propio span de Open
 - **Rate limiting con Redis**: fixed window counter (`INCR`+`EXPIRE`) por API key, con fail-open si Redis no responde.
 - **Cost tracking en Postgres**: cada request queda registrada (tokens, costo estimado, latencia, éxito/error, si usó fallback) sin bloquear la respuesta.
 - **Endpoint de métricas**: agregados globales con ventana de los últimos 60s y del día corrido (UTC).
+- **Tool/function calling**: `tools` en el request (formato OpenAI) funciona igual con Gemini u OpenAI — el gateway traduce hacia el formato nativo de cada provider (incluyendo el `thought_signature` que Gemini 3.x exige en conversaciones multi-turno) y siempre devuelve `tool_calls` en el mismo formato, sin importar qué provider respondió. Ver [`DECISIONS.md`](./DECISIONS.md).
 - **Tracing distribuido con OpenTelemetry**: un span por capa (auth, rate limiting, routing, llamada al provider, escritura en Postgres) exportado a Jaeger vía OTLP — permite ver dónde se va el tiempo dentro de un request individual, algo que `/metrics` (agregado) no muestra. Desactivado por default fuera de Docker (`OTEL_ENABLED=false`); UI en `http://localhost:16686` al levantar el stack completo. Ver [`DECISIONS.md`](./DECISIONS.md).
 
 ## Stack
@@ -115,6 +116,39 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   "model": "gemini-3.5-flash-lite",
   "usage": {"input_tokens": 8, "output_tokens": 142, "total_tokens": 150}
 }
+```
+
+**Tool calling** (funciona igual con `model: "gpt-4o-mini"` u otro modelo de OpenAI):
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: devkey1" \
+  -d '{
+    "model": "gemini-3.5-flash-lite",
+    "messages": [{"role": "user", "content": "What is the weather in Tokyo?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+      }
+    }]
+  }'
+```
+```json
+{
+  "content": null,
+  "tool_calls": [{
+    "id": "call_582542",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": "{\"city\": \"Tokyo\"}"}
+  }],
+  "model": "gemini-3.5-flash-lite",
+  "usage": {"input_tokens": 51, "output_tokens": 16, "total_tokens": 67}
+}
+```
+(la respuesta real de Gemini también trae `tool_calls[0].provider_data.gemini_thought_signature` — un blob opaco omitido acá por brevedad; hay que reenviarlo intacto si se sigue la conversación, ver `DECISIONS.md`.)
 ```
 
 **Uso acumulado de una API key**:

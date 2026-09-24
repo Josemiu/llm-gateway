@@ -1,15 +1,16 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from app.schemas.chat import ChatMessage
+from app.schemas.chat import ChatMessage, Tool, ToolCall
 
 
 @dataclass(frozen=True)
 class ProviderResponse:
-    content: str
+    content: str | None
     model: str
     input_tokens: int
     output_tokens: int
+    tool_calls: list[ToolCall] | None = None
 
 
 class ProviderError(Exception):
@@ -22,5 +23,8 @@ class ProviderError(Exception):
 class LLMProvider(ABC):
     @abstractmethod
     async def generate(
-        self, model: str, messages: list[ChatMessage]
+        self,
+        model: str,
+        messages: list[ChatMessage],
+        tools: list[Tool] | None = None,
     ) -> ProviderResponse: ...

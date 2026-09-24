@@ -1,3 +1,59 @@
+## Tool/function calling en `/v1/chat/completions`
+
+`llm-gateway` se declaró "cerrado" en su Etapa 5, pero un consumidor real
+nuevo (`agent-platform`, Fase 3: un agente que decide cuándo usar una tool)
+necesitaba tool-calling real, que el gateway no soportaba - `ChatMessage`
+solo tenía `content: str`, sin manera de representar una decisión de
+"llamar a esta función" ni su resultado. Se evaluó resolver esto del lado
+de `agent-platform` con un truco de prompting (pedirle al modelo que
+responda en JSON estructurado y parsearlo a mano), pero se descartó: no es
+el patrón estándar, es menos confiable que tool-calling nativo, y muy
+probablemente habría que tirarlo al llegar a la Fase 4 de `agent-platform`
+(LangGraph), que sí espera tool-calling real. Se decidió extender el
+gateway en su lugar - es exactamente el tipo de evolución que la
+arquitectura del portfolio anticipaba ("el gateway sirve a consumidores
+reales", no una excusa para reabrir el proyecto sin motivo).
+
+**Schema** (`app/schemas/chat.py`): `ChatMessage` gana `role: "tool"` (antes
+solo system/user/assistant), más `tool_calls` (en un mensaje de assistant
+que decide llamar una función) y `tool_call_id` (en el mensaje "tool" que
+trae el resultado, correlacionado por id). `ChatCompletionRequest` gana
+`tools: list[Tool] | None`. `ChatCompletionResponse.content` pasa a ser
+opcional (`str | None`) porque una respuesta que solo llama a una tool no
+tiene texto. El formato de `Tool`/`ToolCall` sigue la convención de OpenAI
+(`arguments` como string JSON, no dict parseado) por ser el más extendido -
+`GeminiProvider` traduce hacia/desde el formato nativo de Gemini
+internamente; el consumidor (`agent-platform`) nunca ve esa diferencia.
+
+**`ToolCall.provider_data: dict | None`**: campo opaco para datos que un
+provider necesita hacer viajar de ida y vuelta en la conversación sin que
+signifiquen nada para el schema común. Existe por un hallazgo real
+verificado en vivo: los modelos Gemini 3.x ("thinking") devuelven un
+`thought_signature` binario en cada parte de `function_call`, y **rechazan
+con 400 INVALID_ARGUMENT** la siguiente vuelta de la conversación si ese
+`thought_signature` no se reenvía intacto en esa misma parte (confirmado
+haciendo una llamada real de dos turnos antes de asumir que el diseño
+funcionaba - la primera versión sin este campo fallaba de verdad en el
+segundo turno). OpenAI no tiene este concepto y nunca setea ni lee
+`provider_data` - el campo es puramente aditivo para quien no lo necesita.
+
+**Verificado en vivo con Gemini real** (no solo con SDK mockeado): un
+diálogo completo de dos turnos (pregunta → el modelo pide `get_weather` →
+se le devuelve un resultado inventado → responde en lenguaje natural
+usándolo) funcionó de punta a punta contra la API real, incluyendo a
+través del endpoint HTTP completo (`/v1/chat/completions`), no solo
+llamando al provider directamente. No se pudo hacer la misma verificación
+en vivo contra OpenAI real por el problema ya documentado de créditos - esa
+implementación se hizo contra la documentación oficial (API de tool calling
+extremadamente estable y bien documentada) y se cubrió con tests
+mockeados equivalentes a los de Gemini.
+
+**Compatibilidad hacia atrás**: los 48 tests existentes antes de este
+cambio siguen pasando sin modificarlos - `tools` es opcional en el request,
+`tool_calls`/`provider_data` son opcionales en el schema, y
+`LLMProvider.generate()` gana `tools: list[Tool] | None = None` con default,
+no rompe ningún call site existente.
+
 ## Bug real: migración `8d2dcb772e99` rompía `docker compose up` desde cero
 
 Durante el cierre del proyecto (Etapa 5) se verificó `docker compose up`
