@@ -1,3 +1,27 @@
+## Bug real: routing adaptativo sin fail-open tumbaba `model: "auto"` si Postgres no respondía
+
+Encontrado en vivo integrando `agent-platform` (que corre su propio agente
+contra el gateway sin Docker, sin Postgres levantado): cualquier request con
+`model: "auto"` devolvía 500 en vez de una respuesta normal cuando Postgres
+no estaba disponible. Causa: `select_provider()` (Etapa 3, routing
+adaptativo) hace `await get_provider_stats(...)` sin ningún manejo de
+errores - a diferencia de Redis para rate limiting, que explícitamente
+falla abierto (`except RedisConnectionError` en `enforce_rate_limit`), una
+falla de Postgres acá no tenía ningún camino de degradación y tiraba abajo
+el request entero, aunque las stats de routing adaptativo son solo un
+"nice-to-have" sobre la heurística base, no una dependencia real del
+request.
+
+Fix: `select_provider()` envuelve la consulta en un `try/except Exception`
+- si falla por cualquier motivo, loguea un `WARNING` con el traceback
+completo y sigue con `stats_by_provider = {}` (equivalente a "sin
+evidencia suficiente", el mismo camino que ya existía para providers con
+pocas muestras). Mismo criterio que ya estaba documentado para Redis, ahora
+aplicado consistentemente a la otra dependencia externa nueva que trajo el
+routing adaptativo. Verificado en vivo: con Postgres apagado, un request
+`model: "auto"` antes devolvía 500 y ahora responde normal (loguea el
+warning y usa la heurística base sin el ajuste adaptativo).
+
 ## Tool/function calling en `/v1/chat/completions`
 
 `llm-gateway` se declaró "cerrado" en su Etapa 5, pero un consumidor real

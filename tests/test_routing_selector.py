@@ -215,6 +215,22 @@ async def test_select_provider_auto_ignores_stats_below_min_samples(usage_db) ->
 
 
 @pytest.mark.asyncio
+async def test_select_provider_auto_fails_open_when_stats_query_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken_get_provider_stats(window_minutes: int) -> dict:
+        raise ConnectionError("Postgres is unreachable")
+
+    monkeypatch.setattr(
+        "app.routing.selector.get_provider_stats", broken_get_provider_stats
+    )
+
+    decision = await select_provider("auto", _user_message("Hi there"))
+
+    assert decision.provider_name == "gemini"
+
+
+@pytest.mark.asyncio
 async def test_select_provider_explicit_model_bypasses_adaptive_routing(usage_db) -> None:
     await _seed(
         usage_db,

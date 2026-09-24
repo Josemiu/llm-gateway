@@ -137,9 +137,22 @@ async def select_provider(model: str, messages: list[ChatMessage]) -> RoutingDec
         span.set_attribute("model.requested", model)
         if model == "auto":
             name = "openai" if _is_complex(messages) else "gemini"
-            stats_by_provider = await get_provider_stats(
-                settings.routing_stats_window_minutes
-            )
+            try:
+                stats_by_provider = await get_provider_stats(
+                    settings.routing_stats_window_minutes
+                )
+            except Exception:
+                # Adaptive routing is a nice-to-have on top of the base
+                # heuristic, not a dependency the whole request should die
+                # on - same fail-open philosophy as Redis for rate limiting
+                # (see DECISIONS.md). An unreachable Postgres must not turn
+                # every "auto" request into a 500.
+                logger.warning(
+                    "Could not fetch provider stats for adaptive routing; "
+                    "falling back to the base heuristic",
+                    exc_info=True,
+                )
+                stats_by_provider = {}
             name = _apply_adaptive_policy(name, stats_by_provider)
             span.set_attribute("provider.selected", name)
             return _build_decision(name, PROVIDER_DEFAULT_MODELS[name])
