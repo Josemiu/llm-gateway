@@ -9,3 +9,4 @@ venv/
 .DS_Store
 docker/*.log
 postgres_data/
+CLAUDE.md
